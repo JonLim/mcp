@@ -14,7 +14,10 @@
 """Utility functions for AWS Documentation MCP Server."""
 
 import markdownify
+import threading
+import uuid
 from awslabs.aws_documentation_mcp_server.models import RecommendationResult
+from loguru import logger
 from typing import Any, Dict, List
 
 
@@ -255,3 +258,59 @@ def parse_recommendation_results(data: Dict[str, Any]) -> List[RecommendationRes
             )
 
     return results
+
+
+SESSION_TIMEOUT = 600  # 10 minutes
+
+
+def refresh_session_uuid() -> None:
+    """Create or refresh the session UUID, and start a new timer for expiration of the session UUID.
+
+    Args:
+        None
+
+    Returns:
+        None
+    """
+    global SESSION_UUID
+
+    if 'SESSION_UUID' not in globals():
+        SESSION_UUID = (str(uuid.uuid4()), threading.Timer(SESSION_TIMEOUT, refresh_session_uuid))
+        SESSION_UUID[1].start()
+        logger.info(f'Created new session UUID: {SESSION_UUID}')
+        return
+
+    if SESSION_UUID and not SESSION_UUID[1].is_alive():
+        try:
+            SESSION_UUID = (
+                str(uuid.uuid4()),
+                threading.Timer(SESSION_TIMEOUT, refresh_session_uuid),
+            )
+            SESSION_UUID[1].start()
+        finally:
+            logger.info(f'Refreshed session UUID: {SESSION_UUID}')
+
+
+def get_session_uuid() -> str:
+    """Get the current session UUID, signalling user interaction, which refreshes the timer/expiration.
+
+    Args:
+        None
+
+    Returns:
+        Session UUID as string
+    """
+    global SESSION_UUID
+
+    # Check if we need to refresh first
+    if 'SESSION_UUID' not in globals() or not SESSION_UUID or not SESSION_UUID[1].is_alive():
+        refresh_session_uuid()
+        return SESSION_UUID[0]
+
+    # Cancel the threading.Timer to refresh the expiration
+    SESSION_UUID[1].cancel()
+    SESSION_UUID = (SESSION_UUID[0], threading.Timer(SESSION_TIMEOUT, refresh_session_uuid))
+    SESSION_UUID[1].start()
+
+    logger.info(f'Getting session UUID: {SESSION_UUID[0]}')
+    return SESSION_UUID[0]

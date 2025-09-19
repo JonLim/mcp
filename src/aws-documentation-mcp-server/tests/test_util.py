@@ -14,11 +14,14 @@
 """Tests for utility functions in the AWS Documentation MCP Server."""
 
 import os
+import threading
 from awslabs.aws_documentation_mcp_server.util import (
     extract_content_from_html,
     format_documentation_result,
+    get_session_uuid,
     is_html_content,
     parse_recommendation_results,
+    refresh_session_uuid,
 )
 from unittest.mock import MagicMock, patch
 
@@ -377,3 +380,159 @@ class TestParseRecommendationResults:
         assert 'https://docs.aws.amazon.com/journey' in urls
         assert 'https://docs.aws.amazon.com/new' in urls
         assert 'https://docs.aws.amazon.com/similar' in urls
+
+
+class TestRefreshSessionUUID:
+    """Tests for refresh_session_uuid function."""
+
+    def test_create_uuid_when_none(self):
+        """Test creating UUID when SESSION_UUID is not set."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Ensure SESSION_UUID doesn't exist
+        if hasattr(util_module, 'SESSION_UUID'):
+            delattr(util_module, 'SESSION_UUID')
+
+        refresh_session_uuid()
+
+        assert hasattr(util_module, 'SESSION_UUID')
+        assert util_module.SESSION_UUID is not None
+        assert isinstance(util_module.SESSION_UUID[0], str)
+        assert isinstance(util_module.SESSION_UUID[1], threading.Timer)
+        assert util_module.SESSION_UUID[1].is_alive()
+
+        # Cleanup
+        util_module.SESSION_UUID[1].cancel()
+
+    def test_refresh_expired_timer(self):
+        """Test refreshing UUID when timer has expired."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Create expired timer
+        expired_timer = threading.Timer(0.1, lambda: None)
+        expired_timer.start()
+        expired_timer.join()  # Wait for it to finish
+
+        old_uuid = 'old-uuid'
+        util_module.SESSION_UUID = (old_uuid, expired_timer)
+
+        refresh_session_uuid()
+
+        assert not expired_timer.is_alive()
+        assert util_module.SESSION_UUID[0] != old_uuid
+        assert isinstance(util_module.SESSION_UUID[0], str)
+        assert isinstance(util_module.SESSION_UUID[1], threading.Timer)
+        assert util_module.SESSION_UUID[1].is_alive()
+
+        # Cleanup
+        util_module.SESSION_UUID[1].cancel()
+
+    def test_no_refresh_when_timer_alive(self):
+        """Test that UUID is not refreshed when timer is still alive."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Create active timer
+        active_timer = threading.Timer(60, lambda: None)
+        active_timer.start()
+
+        original_uuid = 'test-uuid'
+        util_module.SESSION_UUID = (original_uuid, active_timer)
+
+        refresh_session_uuid()
+
+        # UUID should remain the same
+        assert util_module.SESSION_UUID[0] == original_uuid
+
+        # Cleanup
+        active_timer.cancel()
+
+
+class TestGetSessionUUID:
+    """Tests for get_session_uuid function."""
+
+    def test_get_uuid_when_exists_and_alive(self):
+        """Test getting UUID when SESSION_UUID exists with alive timer."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Set up existing session with alive timer
+        existing_timer = threading.Timer(60, lambda: None)
+        existing_timer.start()
+        existing_uuid = 'existing-uuid'
+        util_module.SESSION_UUID = (existing_uuid, existing_timer)
+
+        result = get_session_uuid()
+
+        assert result == existing_uuid
+        assert util_module.SESSION_UUID[0] == existing_uuid
+        assert isinstance(util_module.SESSION_UUID[1], threading.Timer)
+        assert util_module.SESSION_UUID[1].is_alive()
+        assert util_module.SESSION_UUID[1] != existing_timer  # New timer created
+
+        # Cleanup
+        existing_timer.cancel()
+        util_module.SESSION_UUID[1].cancel()
+
+    def test_get_uuid_when_no_session(self):
+        """Test getting UUID when no SESSION_UUID exists."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Remove SESSION_UUID
+        if hasattr(util_module, 'SESSION_UUID'):
+            delattr(util_module, 'SESSION_UUID')
+
+        result = get_session_uuid()
+
+        # Should create new session via refresh_session_uuid
+        assert hasattr(util_module, 'SESSION_UUID')
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert isinstance(util_module.SESSION_UUID[1], threading.Timer)
+        assert util_module.SESSION_UUID[1].is_alive()
+
+        # Cleanup
+        util_module.SESSION_UUID[1].cancel()
+
+    def test_get_uuid_when_timer_expired(self):
+        """Test getting UUID when timer has expired."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Create expired timer
+        expired_timer = threading.Timer(0.1, lambda: None)
+        expired_timer.start()
+        expired_timer.join()  # Wait for it to finish
+
+        old_uuid = 'old-uuid'
+        util_module.SESSION_UUID = (old_uuid, expired_timer)
+
+        result = get_session_uuid()
+
+        # Should get new UUID via refresh_session_uuid
+        assert result != old_uuid
+        assert isinstance(result, str)
+        assert isinstance(util_module.SESSION_UUID[1], threading.Timer)
+        assert util_module.SESSION_UUID[1].is_alive()
+
+        # Cleanup
+        util_module.SESSION_UUID[1].cancel()
+
+    def test_get_uuid_when_timer_expires_at_same_time(self):
+        """Test getting UUID when timer has expired and might be refreshing UUID."""
+        import awslabs.aws_documentation_mcp_server.util as util_module
+
+        # Create expired timer
+        expired_timer = threading.Timer(1, refresh_session_uuid)
+        old_uuid = 'old-uuid'
+        util_module.SESSION_UUID = (old_uuid, expired_timer)
+
+        expired_timer.start()
+        expired_timer.join()  # Wait for timer to expire
+        result = get_session_uuid()
+
+        # Should get new UUID via refresh_session_uuid
+        assert result != old_uuid
+        assert isinstance(result, str)
+        assert isinstance(util_module.SESSION_UUID[1], threading.Timer)
+        assert util_module.SESSION_UUID[1].is_alive()
+
+        # Cleanup
+        util_module.SESSION_UUID[1].cancel()

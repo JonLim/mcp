@@ -16,7 +16,6 @@
 import httpx
 import json
 import re
-import uuid
 
 # Import models
 from awslabs.aws_documentation_mcp_server.models import (
@@ -24,13 +23,15 @@ from awslabs.aws_documentation_mcp_server.models import (
     SearchResult,
 )
 from awslabs.aws_documentation_mcp_server.server_utils import (
-    DEFAULT_USER_AGENT,
+    get_user_agent,
     read_documentation_impl,
 )
 
 # Import utility functions
 from awslabs.aws_documentation_mcp_server.util import (
+    get_session_uuid,
     parse_recommendation_results,
+    refresh_session_uuid,
 )
 from loguru import logger
 from mcp.server.fastmcp import Context, FastMCP
@@ -40,7 +41,7 @@ from typing import List
 
 SEARCH_API_URL = 'https://proxy.search.docs.aws.amazon.com/search'
 RECOMMENDATIONS_API_URL = 'https://contentrecs-api.docs.aws.amazon.com/v1/recommendations'
-SESSION_UUID = str(uuid.uuid4())
+refresh_session_uuid()
 
 mcp = FastMCP(
     'awslabs.aws-documentation-mcp-server',
@@ -140,7 +141,8 @@ async def read_documentation(
         await ctx.error(f'Invalid URL: {url_str}. URL must end with .html')
         raise ValueError('URL must end with .html')
 
-    return await read_documentation_impl(ctx, url_str, max_length, start_index, SESSION_UUID)
+    session_uuid = get_session_uuid()
+    return await read_documentation_impl(ctx, url_str, max_length, start_index, session_uuid)
 
 
 @mcp.tool()
@@ -195,7 +197,8 @@ async def search_documentation(
         'locales': ['en_us'],
     }
 
-    search_url_with_session = f'{SEARCH_API_URL}?session={SESSION_UUID}'
+    session_uuid = get_session_uuid()
+    search_url_with_session = f'{SEARCH_API_URL}?session={session_uuid}'
 
     async with httpx.AsyncClient() as client:
         try:
@@ -204,8 +207,8 @@ async def search_documentation(
                 json=request_body,
                 headers={
                     'Content-Type': 'application/json',
-                    'User-Agent': DEFAULT_USER_AGENT,
-                    'X-MCP-Session-Id': SESSION_UUID,
+                    'User-Agent': get_user_agent(),
+                    'X-MCP-Session-Id': session_uuid,
                 },
                 timeout=30,
             )
@@ -328,13 +331,14 @@ async def recommend(
     url_str = str(url)
     logger.debug(f'Getting recommendations for: {url_str}')
 
-    recommendation_url = f'{RECOMMENDATIONS_API_URL}?path={url_str}&session={SESSION_UUID}'
+    session_uuid = get_session_uuid()
+    recommendation_url = f'{RECOMMENDATIONS_API_URL}?path={url_str}&session={session_uuid}'
 
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(
                 recommendation_url,
-                headers={'User-Agent': DEFAULT_USER_AGENT},
+                headers={'User-Agent': get_user_agent()},
                 timeout=30,
             )
         except httpx.HTTPError as e:

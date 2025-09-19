@@ -16,6 +16,8 @@
 import asyncio
 import pytest
 from awslabs.aws_documentation_mcp_server.server_aws import recommend
+from awslabs.aws_documentation_mcp_server.server_utils import DEFAULT_USER_AGENT
+from unittest.mock import patch
 
 
 class MockContext:
@@ -30,31 +32,39 @@ class MockContext:
 @pytest.mark.live
 async def test_recommend_live():
     """Test the recommend tool with a live API call."""
-    # Use a real AWS documentation URL
-    url = 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html'
-    ctx = MockContext()
+    with patch(
+        'awslabs.aws_documentation_mcp_server.server_aws.get_user_agent'
+    ) as mock_get_user_agent:
+        # Add "Test" suffix for User-Agent, to help differentiate from real traffic
+        mock_get_user_agent.return_value = DEFAULT_USER_AGENT.replace(
+            '(AWS Documentation Server)', '(AWS Documentation Server Tests)'
+        )
 
-    # Call the recommend function
-    results = await recommend(ctx, url=url)
+        # Use a real AWS documentation URL
+        url = 'https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/concepts.html'
+        ctx = MockContext()
 
-    # Verify the results
-    assert results is not None
-    assert len(results) > 0
+        # Call the recommend function
+        results = await recommend(ctx, url=url)
 
-    # Check that each result has the expected structure
-    for result in results:
-        assert result.url is not None and result.url != ''
-        assert result.title is not None and result.title != ''
-        # Context is optional, so we don't assert on it
+        # Verify the results
+        assert results is not None
+        assert len(results) > 0
 
-    # Print results for debugging (will show in pytest output with -v flag)
-    print(f'\nReceived {len(results)} recommendations:')
-    for i, result in enumerate(results, 1):
-        print(f'\n--- Recommendation {i} ---')
-        print(f'Title: {result.title}')
-        print(f'URL: {result.url}')
-        if result.context:
-            print(f'Context: {result.context}')
+        # Check that each result has the expected structure
+        for result in results:
+            assert result.url is not None and result.url != ''
+            assert result.title is not None and result.title != ''
+            # Context is optional, so we don't assert on it
+
+        # Print results for debugging (will show in pytest output with -v flag)
+        print(f'\nReceived {len(results)} recommendations:')
+        for i, result in enumerate(results, 1):
+            print(f'\n--- Recommendation {i} ---')
+            print(f'Title: {result.title}')
+            print(f'URL: {result.url}')
+            if result.context:
+                print(f'Context: {result.context}')
 
 
 if __name__ == '__main__':

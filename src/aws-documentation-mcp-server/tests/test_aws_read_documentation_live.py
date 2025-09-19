@@ -17,6 +17,8 @@ import pytest
 from awslabs.aws_documentation_mcp_server.server_aws import (
     read_documentation as read_documentation_global,
 )
+from awslabs.aws_documentation_mcp_server.server_utils import DEFAULT_USER_AGENT
+from unittest.mock import patch
 
 
 class MockContext:
@@ -31,98 +33,114 @@ class MockContext:
 @pytest.mark.live
 async def test_read_documentation_global_live():
     """Test that read_documentation can fetch real AWS global documentation."""
-    # Use a stable AWS documentation URL that's unlikely to change
-    url = 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html'
-    ctx = MockContext()
+    with patch(
+        'awslabs.aws_documentation_mcp_server.server_aws.get_user_agent'
+    ) as mock_get_user_agent:
+        # Add "Test" suffix for User-Agent, to help differentiate from real traffic
+        mock_get_user_agent.return_value = DEFAULT_USER_AGENT.replace(
+            '(AWS Documentation Server)', '(AWS Documentation Server Tests)'
+        )
 
-    # Call the tool
-    result = await read_documentation_global(ctx, url=url, max_length=5000, start_index=0)
+        # Use a stable AWS documentation URL that's unlikely to change
+        url = 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html'
+        ctx = MockContext()
 
-    # Verify the result
-    assert result is not None
-    assert isinstance(result, str)
-    assert len(result) > 0
+        # Call the tool
+        result = await read_documentation_global(ctx, url=url, max_length=5000, start_index=0)
 
-    # Check that the result contains the URL
-    assert url in result
+        # Verify the result
+        assert result is not None
+        assert isinstance(result, str)
+        assert len(result) > 0
 
-    # Check for expected content in the S3 bucket naming rules page
-    expected_content_markers = [
-        'bucket naming rules',
-        'S3',
-        'Amazon',
-        'naming',
-        'rules',
-    ]
+        # Check that the result contains the URL
+        assert url in result
 
-    for marker in expected_content_markers:
-        assert marker.lower() in result.lower(), f"Expected to find '{marker}' in the result"
+        # Check for expected content in the S3 bucket naming rules page
+        expected_content_markers = [
+            'bucket naming rules',
+            'S3',
+            'Amazon',
+            'naming',
+            'rules',
+        ]
 
-    # Check that the content is properly formatted
-    assert 'AWS Documentation from' in result
+        for marker in expected_content_markers:
+            assert marker.lower() in result.lower(), f"Expected to find '{marker}' in the result"
 
-    # Check that the result doesn't contain error messages
-    error_indicators = ['<e>Error', 'Failed to fetch']
-    for indicator in error_indicators:
-        assert indicator not in result, f"Found error indicator '{indicator}' in the result"
+        # Check that the content is properly formatted
+        assert 'AWS Documentation from' in result
 
-    # Print a sample of the result for debugging (will show in pytest output with -v flag)
-    print('\nReceived global documentation content (first 300 chars):')
-    print(f'{result[:300]}...')
+        # Check that the result doesn't contain error messages
+        error_indicators = ['<e>Error', 'Failed to fetch']
+        for indicator in error_indicators:
+            assert indicator not in result, f"Found error indicator '{indicator}' in the result"
+
+        # Print a sample of the result for debugging (will show in pytest output with -v flag)
+        print('\nReceived global documentation content (first 300 chars):')
+        print(f'{result[:300]}...')
 
 
 @pytest.mark.asyncio
 @pytest.mark.live
 async def test_read_documentation_global_pagination_live():
     """Test that read_documentation pagination works correctly for global AWS docs."""
-    # Use a stable AWS documentation URL that's likely to have substantial content
-    url = 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html'
-    ctx = MockContext()
+    with patch(
+        'awslabs.aws_documentation_mcp_server.server_aws.get_user_agent'
+    ) as mock_get_user_agent:
+        # Add "Test" suffix for User-Agent, to help differentiate from real traffic
+        mock_get_user_agent.return_value = DEFAULT_USER_AGENT.replace(
+            '(AWS Documentation Server)', '(AWS Documentation Server Tests)'
+        )
 
-    # Create parameters for the tool with a small max_length to force pagination
-    small_max_length = 1000
+        # Use a stable AWS documentation URL that's likely to have substantial content
+        url = 'https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html'
+        ctx = MockContext()
 
-    # Call the tool for the first page
-    first_page = await read_documentation_global(
-        ctx, url=url, max_length=small_max_length, start_index=0
-    )
+        # Create parameters for the tool with a small max_length to force pagination
+        small_max_length = 1000
 
-    # Verify the first page
-    assert first_page is not None
-    assert isinstance(first_page, str)
-    assert len(first_page) > 0
+        # Call the tool for the first page
+        first_page = await read_documentation_global(
+            ctx, url=url, max_length=small_max_length, start_index=0
+        )
 
-    # Check that the first page indicates there's more content
-    assert 'Content truncated' in first_page
+        # Verify the first page
+        assert first_page is not None
+        assert isinstance(first_page, str)
+        assert len(first_page) > 0
 
-    # Extract the next start_index from the message
-    import re
+        # Check that the first page indicates there's more content
+        assert 'Content truncated' in first_page
 
-    match = re.search(r'start_index=(\d+)', first_page)
-    assert match is not None, 'Could not find next start_index in the result'
+        # Extract the next start_index from the message
+        import re
 
-    next_start_index = int(match.group(1))
-    assert next_start_index > 0, 'Next start_index should be greater than 0'
+        match = re.search(r'start_index=(\d+)', first_page)
+        assert match is not None, 'Could not find next start_index in the result'
 
-    # Get the second page
-    second_page = await read_documentation_global(
-        ctx, url=url, max_length=small_max_length, start_index=next_start_index
-    )
+        next_start_index = int(match.group(1))
+        assert next_start_index > 0, 'Next start_index should be greater than 0'
 
-    # Verify the second page
-    assert second_page is not None
-    assert isinstance(second_page, str)
-    assert len(second_page) > 0
+        # Get the second page
+        second_page = await read_documentation_global(
+            ctx, url=url, max_length=small_max_length, start_index=next_start_index
+        )
 
-    # Check that the content of the two pages is different
-    # We'll compare the first 100 characters of each page after the URL line
-    first_page_content = first_page.split('\n\n', 1)[1][:100]
-    second_page_content = second_page.split('\n\n', 1)[1][:100]
+        # Verify the second page
+        assert second_page is not None
+        assert isinstance(second_page, str)
+        assert len(second_page) > 0
 
-    assert first_page_content != second_page_content, (
-        'First and second page content should be different'
-    )
+        # Check that the content of the two pages is different
+        # We'll compare the first 100 characters of each page after the URL line
+        first_page_content = first_page.split('\n\n', 1)[1][:100]
+        second_page_content = second_page.split('\n\n', 1)[1][:100]
 
-    print('\nGlobal pagination test successful:')
-    print(f'First page start: {first_page_content}')
-    print(f'Second page start: {second_page_content}')
+        assert first_page_content != second_page_content, (
+            'First and second page content should be different'
+        )
+
+        print('\nGlobal pagination test successful:')
+        print(f'First page start: {first_page_content}')
+        print(f'Second page start: {second_page_content}')
