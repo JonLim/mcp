@@ -39,7 +39,7 @@ from pydantic import Field
 from typing import List
 
 
-SEARCH_API_URL = 'https://proxy.search.docs.aws.amazon.com/search'
+SEARCH_API_URL = 'https://proxy.beta.search.docs.aws.a2z.com/search'
 RECOMMENDATIONS_API_URL = 'https://contentrecs-api.docs.aws.amazon.com/v1/recommendations'
 SESSION_UUID = str(uuid.uuid4())
 
@@ -148,6 +148,10 @@ async def read_documentation(
 async def search_documentation(
     ctx: Context,
     search_phrase: str = Field(description='Search phrase to use'),
+    experimental: bool = Field(
+        default=False,
+        description='Enable experimental search features',
+    ),
     limit: int = Field(
         default=10,
         description='Maximum number of results to return',
@@ -180,6 +184,7 @@ async def search_documentation(
     Args:
         ctx: MCP context for logging and error handling
         search_phrase: Search phrase to use
+        experimental: Boolean for using experimental search features
         limit: Maximum number of results to return
 
     Returns:
@@ -198,16 +203,20 @@ async def search_documentation(
 
     search_url_with_session = f'{SEARCH_API_URL}?session={SESSION_UUID}'
 
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': DEFAULT_USER_AGENT,
+        'X-MCP-Session-Id': SESSION_UUID,
+    }
+    if experimental:
+        headers['X-ICX-Experiment-1'] = 'true'
+
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
                 search_url_with_session,
                 json=request_body,
-                headers={
-                    'Content-Type': 'application/json',
-                    'User-Agent': DEFAULT_USER_AGENT,
-                    'X-MCP-Session-Id': SESSION_UUID,
-                },
+                headers=headers,
                 timeout=30,
             )
         except httpx.HTTPError as e:
