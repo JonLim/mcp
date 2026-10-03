@@ -17,6 +17,7 @@ import httpx
 import json
 import re
 import uuid
+from awslabs.aws_documentation_mcp_server import fact_store
 
 # Import models
 from awslabs.aws_documentation_mcp_server.models import (
@@ -97,6 +98,10 @@ mcp = MCPServer(
     - For recent updates to a service, get an URL for any page in that service, then check the **New** section of the `recommend` tool output on that URL
     - If multiple searches with similar terms yield insufficient results, pivot to using `recommend` to find related pages.
     - Always cite the documentation URL when providing information to users
+    - For an enumerable fact (a regional endpoint, which regions a service is in, a default quota value, an operation's required parameters, what must exist before an operation succeeds), call `query_aws_facts` before searching or recalling. These values are arbitrary and change, so a remembered one is often wrong.
+    - When `query_aws_facts` returns `status: "evidence"`, pass its `evidence` URLs to `read_documentation`. The fact store found no typed fact, so the prose is the answer.
+    - When `query_aws_facts` returns `status: "abstain"` with `reason_code: "missing_slot"`, fill the named slot and call again. Do not rephrase the question.
+    - When `query_aws_facts` returns `status: "ok"`, the fact is authoritative. Stop; do not search to confirm it.
 
     ## Tool Selection Guide
 
@@ -106,11 +111,21 @@ mcp = MCPServer(
     - Use `search_table` when: You need specific rows from a large table (e.g., service quotas, pricing, supported models). If read_sections or read_documentation shows a truncated table, use this tool with a query to find the rows you need.
     - Use `recommend` when: You want to find related content to a documentation page you're already viewing or need to find newly released information
     - Use `recommend` as a fallback when: Multiple searches have not yielded the specific information needed
+    - Use `resolve_aws_entity` when: You need the canonical code for a service, operation, resource type, or resource property. Service codes rarely match the marketing name (Cognito user pools are `cognito-idp`, Elastic Load Balancing is `elb`), so resolve before guessing.
+    - Use `query_aws_facts` when: The question has one correct enumerable answer: endpoints, region availability, quotas, operation parameters and IAM actions, headline pricing, operation prerequisites. Give the slots when known, because that path is both faster and more accurate than the natural-language one.
+    - Do NOT use `query_aws_facts` for: troubleshooting, best practices, how-to, comparisons between services, or feature-level questions. It abstains on these by design. Search instead.
+
+    ## Facts versus prose
+
+    The fact store and the documentation tools answer different questions, and they compose. A fact
+    terminates the task. A citation continues it. So resolve the entity, ask for the fact, and fall back
+    to search and read only when the store abstains or returns evidence rather than a fact.
     """,
     dependencies=[
         'pydantic',
         'httpx',
         'beautifulsoup4',
+        'boto3',
     ],
 )
 
@@ -733,6 +748,216 @@ async def recommend(
     results = parse_recommendation_results(data)
     logger.debug(f'Found {len(results)} recommendations for: {url_str}')
     return results
+
+
+async def resolve_aws_entity(
+    ctx: Context,
+    name: str = Field(
+        description='An AWS service, operation, resource type, or resource property name, as written in prose. Examples: "Amazon Aurora", "Elastic Load Balancing", "CreateFunction", "AWS::SQS::Queue", "security group"'
+    ),
+    entity_type: Optional[str] = Field(
+        default=None,
+        description='Restrict to one kind: service, operation, resource_type, or resource_property. Omit to search all four.',
+    ),
+) -> Dict[str, Any]:
+    """Turn an AWS name written in prose into the canonical id that query_aws_facts needs.
+
+    ## When to use
+
+    Call this FIRST whenever the exact code is not already known. Service codes rarely match the
+    marketing name: Cognito user pools are `cognito-idp`, Elastic Load Balancing is `elb`, Kinesis Data
+    Firehose is now `firehose`. Guessing produces an abstain and wastes a round trip.
+
+    Skip it when the canonical code is already known from a previous call or from the user's own input.
+
+    ## Cost
+
+    Local and deterministic, about 8ms server-side, and cached for the rest of this session. No embedding
+    or graph work. Calling it is cheaper than one failed query_aws_facts attempt.
+
+    ## Reading the result
+
+    Each candidate carries `canonical_id`, `type`, `name`, `score`, and `resolved_via`. Services also
+    carry `display_name` and `has_facts`.
+
+    - **One candidate at 0.9 or above**: use it.
+    - **Several candidates**: the name is genuinely ambiguous and the store will not guess. `amazon
+      cognito` returns three Cognito services, and `CreateFunction` returns one candidate per service
+      that defines it. Pick using the user's context, or ask.
+    - **`has_facts` is false**: the name is a real AWS service, but the store holds no facts about it.
+      Do not expect query_aws_facts to answer.
+    - **Zero candidates**: expected for three inputs, and retrying will not help. Features such as
+      "intelligent tiering" are not modelled, third-party products such as "Palo Alto Networks" are not
+      AWS entities, and things that are not services ("aws cli", "amazon linux 2023") have no code. Use
+      search_documentation for those.
+
+    ## Example
+
+    `resolve_aws_entity("Amazon Aurora")` returns `svc:aurora`, display name "Amazon Aurora", via alias.
+    The service slot for query_aws_facts is then `aurora`.
+
+    Args:
+        ctx: MCP context for logging and error handling
+        name: The name to resolve
+        entity_type: Optional restriction to one entity kind
+
+    Returns:
+        Candidates with their canonical ids, or an empty list with a note explaining why
+    """
+    if not name or not name.strip():
+        return {'resolve': name, 'count': 0, 'candidates': [], 'note': 'empty input'}
+    logger.debug(f'Resolving AWS entity: {name}')
+    result = await fact_store.resolve(name.strip(), entity_type=entity_type)
+    if 'candidates' not in result:
+        await ctx.error(f'Fact store unavailable while resolving "{name}"')
+    return result
+
+
+async def query_aws_facts(
+    ctx: Context,
+    q: Optional[str] = Field(
+        default=None,
+        description='A natural-language question. Use only when the slots below are unknown, because this path runs a keyword classifier and can reach the graph.',
+    ),
+    fact_type: Optional[str] = Field(
+        default=None,
+        description='One of: endpoint, availability, quota, op_attribute, list_operations, pricing, find_related, prerequisites.',
+    ),
+    service: Optional[str] = Field(
+        default=None,
+        description='Canonical service code, for example sts, lambda, cognito-idp. Get it from resolve_aws_entity when unsure.',
+    ),
+    region: Optional[str] = Field(default=None, description='Region code, for example eu-west-1.'),
+    operation: Optional[str] = Field(
+        default=None, description='API operation name, for example PutObject.'
+    ),
+    resource_property: Optional[str] = Field(
+        default=None,
+        description='For fact_type=find_related: a resource property such as vpc or security group.',
+    ),
+    depth: Optional[int] = Field(
+        default=None,
+        description='For fact_type=prerequisites: how many levels of the dependency chain to walk, 1 to 4.',
+    ),
+    from_handle: Optional[str] = Field(
+        default=None,
+        description="A canonical_id from a previous response's entities list, to continue a walk cheaply.",
+    ),
+    traverse: Optional[str] = Field(
+        default=None,
+        description='A named traversal: quotas_for_operation or operations_on_resource.',
+    ),
+    resource_type: Optional[str] = Field(
+        default=None,
+        description='For traverse=operations_on_resource, for example AWS::SQS::Queue.',
+    ),
+) -> Dict[str, Any]:
+    """Look up an enumerable AWS fact from authoritative sources, or get an honest abstain.
+
+    ## What this answers well
+
+    Facts that are arbitrary, so no model can infer them, and consequential, so a wrong answer costs
+    something: regional endpoints, which regions a service is in, default quota values and whether they
+    are adjustable, an operation's required parameters and IAM actions, headline pricing, and which
+    resources an operation needs to exist first.
+
+    Prefer this over recalling a quota or a region list from memory. Those values are arbitrary and
+    change, and a fabricated one is costly.
+
+    ## Choosing the cheapest call
+
+    Give the slots whenever they are known. `fact_type` plus `service` plus `region` costs about 4ms and
+    skips the classifier. A bare `q` costs about 18ms, and up to 13 graph queries and ~630ms when it
+    falls through to document retrieval. The slots are not an optimization, they are the accurate path.
+
+    To walk several steps, pass `from_handle` with a `canonical_id` the previous response returned. That
+    costs 2 graph queries and about 20ms, against re-asking in natural language.
+
+    ## Reading `answer.status`, which decides the next move
+
+    - **`ok`** (or `status` absent): the fact is answered. Stop. Do not search for confirmation.
+    - **`evidence`**: no typed fact exists, and `evidence` holds documentation URLs. These are ranked
+      retrieval candidates, not verified facts. Pass the URLs to read_documentation.
+    - **`abstain`**: nothing to return. Read `reason_code`:
+      - `missing_slot`: fill the named slot and call again. Do NOT rephrase the question.
+      - `ambiguous`: name the service to disambiguate the operation.
+      - `no_data`, `unsupported_type`, `low_confidence`, `store_unavailable`: stop calling this tool and
+        use search_documentation instead.
+
+    ## Scope, so retries stop early
+
+    The store does not answer: pricing beyond a curated headline slice, troubleshooting and how-to as
+    typed facts, comparisons between two services in one request, feature-level granularity (a feature
+    question resolves to the parent service, which is the wrong granularity), and operation-level or
+    feature-level region availability. Availability is service-level only.
+
+    ## Examples
+
+    - Endpoint: `fact_type="endpoint", service="sts", region="eu-west-1"`
+    - Region list: `fact_type="availability", service="aurora"`
+    - Quota: `fact_type="quota", service="lambda", region="eu-west-1"`
+    - Parameters: `fact_type="op_attribute", service="s3", operation="PutObject"`
+    - Provisioning order: `fact_type="prerequisites", service="lambda", operation="CreateFunction", depth=2`
+    - Related resources: `fact_type="find_related", resource_property="security group"`
+
+    Args:
+        ctx: MCP context for logging and error handling
+        q: Natural-language question, when the slots are unknown
+        fact_type: The fact type to look up
+        service: Canonical service code
+        region: Region code
+        operation: API operation name
+        resource_property: Resource property, for find_related
+        depth: Dependency chain depth, for prerequisites
+        from_handle: A canonical_id from a previous response, to continue a walk
+        traverse: A named traversal
+        resource_type: Resource type, for operations_on_resource
+
+    Returns:
+        An envelope with `answer` (carrying `status`), plus `entities`, `evidence`, `route` and `timing`
+    """
+    payload: Dict[str, Any] = {}
+    if q:
+        payload['q'] = q
+    for key, value in (
+        ('fact_type', fact_type),
+        ('service', service),
+        ('region', region),
+        ('operation', operation),
+        ('property', resource_property),
+        ('depth', depth),
+        ('from', from_handle),
+        ('traverse', traverse),
+        ('resource_type', resource_type),
+    ):
+        if value is not None and value != '':
+            payload[key] = value
+
+    if not payload:
+        return {
+            'answer': {
+                'status': 'abstain',
+                'reason_code': 'missing_slot',
+                'detail': 'give either q, or fact_type with its slots, or from_handle, or traverse',
+            }
+        }
+
+    logger.debug(f'Querying fact store: {payload}')
+    result = await fact_store.call(payload)
+    answer = result.get('answer') or {}
+    if answer.get('reason_code') == 'store_unavailable':
+        await ctx.error(f'Fact store unavailable: {answer.get("detail")}')
+    return result
+
+
+# Registered conditionally: the fact store endpoint is IAM-authorized and not public, so a user without
+# access can set AWS_FACT_STORE_ENABLED=false and keep these out of the agent's tool list entirely.
+if fact_store.is_configured():
+    mcp.tool()(resolve_aws_entity)
+    mcp.tool()(query_aws_facts)
+    logger.info(f'Fact store tools registered against {fact_store.endpoint()}')
+else:
+    logger.info('Fact store tools disabled (AWS_FACT_STORE_ENABLED=false)')
 
 
 def main():

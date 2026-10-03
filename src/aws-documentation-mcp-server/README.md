@@ -12,6 +12,8 @@ This MCP server provides tools to access AWS documentation, search for content, 
 - **Search Table**: Filter and search rows in large documentation tables (e.g., service quotas, pricing) without reading the full page (global only)
 - **Recommendations**: Get content recommendations for AWS documentation pages (global only)
 - **Get Available Services List**: Get a list of available AWS services in China regions (China only)
+- **Resolve AWS Entity**: Turn a service, operation, resource type, or resource property name written in prose into a canonical id (fact store, global only)
+- **Query AWS Facts**: Look up enumerable AWS facts (endpoints, region availability, quotas, operation parameters, prerequisites) from authoritative sources, with an honest abstain instead of a guess (fact store, global only)
 
 ## Prerequisites
 
@@ -115,6 +117,10 @@ or docker after a successful `docker build -t mcp/aws-documentation .`:
 | `FASTMCP_LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | `WARNING` |
 | `AWS_DOCUMENTATION_PARTITION` | AWS partition (`aws` or `aws-cn`) | `aws` |
 | `MCP_USER_AGENT` | Custom User-Agent string for HTTP requests | Chrome-based default |
+| `AWS_FACT_STORE_ENABLED` | Register the fact store tools (`false` to hide them) | `true` |
+| `AWS_FACT_STORE_ENDPOINT` | Fact store query endpoint | the shared POC endpoint |
+| `AWS_FACT_STORE_REGION` | Signing region for the fact store API | `us-west-2` |
+| `AWS_FACT_STORE_PROFILE` | AWS profile used to sign fact store requests (falls back to `AWS_PROFILE`, then the default chain) | unset |
 
 ### Corporate Network Support
 
@@ -186,6 +192,55 @@ Gets a list of available AWS services in China regions.
 ```python
 get_available_services() -> str
 ```
+
+### resolve_aws_entity (global only)
+
+Resolves an AWS name written in prose to the canonical id that `query_aws_facts` needs. Service codes
+rarely match the marketing name, so resolve before guessing.
+
+```python
+resolve_aws_entity(name: str, entity_type: str | None = None) -> dict
+```
+
+Returns candidates carrying `canonical_id`, `type`, `score`, and `resolved_via`. Services also carry
+`display_name` and `has_facts`. Several candidates means the name is genuinely ambiguous, and the store
+will not pick for you. Zero candidates is expected for features, third-party products, and things that
+are not services.
+
+### query_aws_facts (global only)
+
+Looks up an enumerable AWS fact, or abstains.
+
+```python
+query_aws_facts(
+    q: str | None = None,
+    fact_type: str | None = None,       # endpoint, availability, quota, op_attribute,
+                                        # list_operations, pricing, find_related, prerequisites
+    service: str | None = None,
+    region: str | None = None,
+    operation: str | None = None,
+    resource_property: str | None = None,
+    depth: int | None = None,
+    from_handle: str | None = None,
+    traverse: str | None = None,
+    resource_type: str | None = None,
+) -> dict
+```
+
+Branch on `answer.status`: `ok` terminates, `evidence` means pass the cited URLs to
+`read_documentation`, and `abstain` means read `reason_code` before deciding whether to retry. A
+`missing_slot` means fill the slot rather than rephrase.
+
+Give the slots when they are known. That path skips the keyword classifier and is both faster and more
+accurate than the natural-language one.
+
+## Fact store access
+
+The fact store endpoint is IAM-authorized, so requests are SigV4-signed with the caller's own
+credentials and the caller needs `execute-api:Invoke` on the API. Without access the two tools return an
+abstain with `reason_code: store_unavailable` and name the documentation tools as the fallback, so the
+rest of the server keeps working. Set `AWS_FACT_STORE_ENABLED=false` to leave them out of the tool list
+entirely.
 
 ## Development
 

@@ -71,7 +71,10 @@ class TestAWSDocumentationMCPServer:
             server_path=self.server_path,
             command='uv',
             args=['run', '--frozen', DOCUMENTATION_SERVER_PY],
-            env={'FASTMCP_LOG_LEVEL': 'ERROR'},
+            # The fact store tools are disabled here on purpose: this test fixes the documentation
+            # server's baseline tool set, and that baseline must not depend on an IAM-authorized
+            # endpoint being configured. See test_fact_store.py for their own coverage.
+            env={'FASTMCP_LOG_LEVEL': 'ERROR', 'AWS_FACT_STORE_ENABLED': 'false'},
         )
 
         await self.test_instance.setup()
