@@ -102,6 +102,7 @@ mcp = MCPServer(
     - When `query_aws_facts` returns `status: "evidence"`, pass its `evidence` URLs to `read_documentation`. The fact store found no typed fact, so the prose is the answer.
     - When `query_aws_facts` returns `status: "abstain"` with `reason_code: "missing_slot"`, fill the named slot and call again. Do not rephrase the question.
     - When `query_aws_facts` returns `status: "ok"`, the fact is authoritative. Stop; do not search to confirm it.
+    - When `query_aws_facts` returns `status: "candidates"`, the rows only share words with the question. Check each `quota_name` against what was asked, and fall back to search if none fits. Never report a candidate as the answer without that check.
 
     ## Tool Selection Guide
 
@@ -778,14 +779,18 @@ async def resolve_aws_entity(
     ## Reading the result
 
     Each candidate carries `canonical_id`, `type`, `name`, `score`, and `resolved_via`. Services also
-    carry `display_name` and `has_facts`.
+    carry `display_name`, `facts`, and sometimes `renamed_from`.
 
     - **One candidate at 0.9 or above**: use it.
     - **Several candidates**: the name is genuinely ambiguous and the store will not guess. `amazon
       cognito` returns three Cognito services, and `CreateFunction` returns one candidate per service
       that defines it. Pick using the user's context, or ask.
-    - **`has_facts` is false**: the name is a real AWS service, but the store holds no facts about it.
-      Do not expect query_aws_facts to answer.
+    - **`facts`** lists the fact types that actually have data for that id. Check it before calling
+      query_aws_facts. `svc:aurora` returns `["availability"]`, so a quota question against it will
+      abstain, and searching the documentation is the faster path.
+    - **`renamed_from`** names a different id that holds the data, when the resolved id is a newer name
+      for the same service. `Amazon EventBridge` resolves to `svc:eventbridge`, whose quotas live under
+      `events`. Use `renamed_from` as the service slot for anything missing from `facts`.
     - **Zero candidates**: expected for three inputs, and retrying will not help. Features such as
       "intelligent tiering" are not modelled, third-party products such as "Palo Alto Networks" are not
       AWS entities, and things that are not services ("aws cli", "amazon linux 2023") have no code. Use
@@ -875,9 +880,14 @@ async def query_aws_facts(
 
     ## Reading `answer.status`, which decides the next move
 
-    - **`ok`** (or `status` absent): the fact is answered. Stop. Do not search for confirmation.
-    - **`evidence`**: no typed fact exists, and `evidence` holds documentation URLs. These are ranked
-      retrieval candidates, not verified facts. Pass the URLs to read_documentation.
+    - **`ok`** (or `status` absent): a slot resolved the fact. Stop. Do not search for confirmation.
+    - **`candidates`**: typed rows that share words with the question, which is weaker than a slot
+      lookup, so they may not answer it. Check `match_basis`: `operation` matched the named operation
+      but returned several rows, `query_terms` matched words in the question, and `all_service_quotas`
+      means nothing matched so the whole set is listed. Read
+      `quota_name` on each row and confirm it is the quota asked about. If none fits, say so and search
+      the documentation. Do NOT report a candidate as the answer without that check. A question about a
+      feature lands here, because features are not modelled.
     - **`abstain`**: nothing to return. Read `reason_code`:
       - `missing_slot`: fill the named slot and call again. Do NOT rephrase the question.
       - `ambiguous`: name the service to disambiguate the operation.
