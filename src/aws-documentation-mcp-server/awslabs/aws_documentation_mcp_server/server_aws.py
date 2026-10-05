@@ -852,6 +852,18 @@ async def query_aws_facts(
         default=None,
         description='A named traversal: quotas_for_operation or operations_on_resource.',
     ),
+    relation: Optional[str] = Field(
+        default=None,
+        description='Relationship intent, used with from_handle to walk the graph. Either an edge type '
+        '(LIMITS, ACTS_ON, REQUIRES, appliesIn, dependsOn, hasChild, relatesTo, references) '
+        'or plain words for one ("what limits", "permissions", "acts on", "children", '
+        '"related"). A wrong value returns the full list, so guessing is cheap.',
+    ),
+    direction: Optional[str] = Field(
+        default=None,
+        description='For relation: out (default), in, or both. Many questions are the inward form: '
+        'quotas LIMITS an operation, so what limits an operation is direction=in.',
+    ),
     resource_type: Optional[str] = Field(
         default=None,
         description='For traverse=operations_on_resource, for example AWS::SQS::Queue.',
@@ -877,6 +889,30 @@ async def query_aws_facts(
 
     To walk several steps, pass `from_handle` with a `canonical_id` the previous response returned. That
     costs 2 graph queries and about 20ms, against re-asking in natural language.
+
+    ## Walking a specific relationship
+
+    `from_handle` plus `relation` walks one edge type, which is **one** graph query and about 20ms,
+    against 13 queries and ~630ms for a natural-language question. State the relationship you want
+    rather than letting retrieval infer it.
+
+    The graph carries eight edge types, so `relation` takes either the name or plain words for it:
+
+    - `LIMITS`: a quota limits an operation. Asking what limits an operation is `direction="in"`.
+    - `ACTS_ON`: an operation acts on a resource type.
+    - `REQUIRES`: an IAM action authorizes an operation.
+    - `appliesIn`: a regional override applies in a region.
+    - `dependsOn`: a task depends on a task. Recursive, so `depth` up to 3 is useful here.
+    - `hasChild`, `relatesTo`, `references`: document and concept structure.
+
+    An unknown `relation` returns the full list rather than an error, so a guess costs one cheap call.
+
+    ## When the slots are the wrong guess
+
+    A structured request can only fail inside the slot you chose. A bare `q` can cross tiers: asked for a
+    Step Functions duration quota the structured call abstains, because no such quota exists, while `q`
+    reaches documentation retrieval instead. So use the slots first, and fall back to `q` when a
+    `no_data` abstain suggests the fact type was wrong rather than the value missing.
 
     ## Reading `answer.status`, which decides the next move
 
@@ -918,9 +954,11 @@ async def query_aws_facts(
         region: Region code
         operation: API operation name
         resource_property: Resource property, for find_related
-        depth: Dependency chain depth, for prerequisites
+        depth: Dependency chain depth for prerequisites, or walk depth for relation
         from_handle: A canonical_id from a previous response, to continue a walk
         traverse: A named traversal
+        relation: Relationship intent to walk from from_handle
+        direction: Walk direction for relation: out, in, or both
         resource_type: Resource type, for operations_on_resource
 
     Returns:
@@ -938,6 +976,8 @@ async def query_aws_facts(
         ('depth', depth),
         ('from', from_handle),
         ('traverse', traverse),
+        ('relation', relation),
+        ('direction', direction),
         ('resource_type', resource_type),
     ):
         if value is not None and value != '':

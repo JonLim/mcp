@@ -212,6 +212,8 @@ class TestQueryToolPayload:
                 depth=None,
                 from_handle=None,
                 traverse=None,
+                relation=None,
+                direction=None,
                 resource_type=None,
             )
         payload = mock_call.call_args[0][0]
@@ -239,9 +241,42 @@ class TestQueryToolPayload:
                 depth=None,
                 from_handle='concept:abc_def',
                 traverse=None,
+                relation=None,
+                direction=None,
                 resource_type=None,
             )
         assert mock_call.call_args[0][0] == {'from': 'concept:abc_def'}
+
+    @pytest.mark.asyncio
+    async def test_relation_and_direction_reach_the_payload(self):
+        """Relation and direction reach the payload."""
+        from awslabs.aws_documentation_mcp_server.server_aws import query_aws_facts
+
+        ctx = AsyncMock()
+        with patch.object(
+            fact_store, 'call', new=AsyncMock(return_value={'answer': {}})
+        ) as mock_call:
+            await query_aws_facts(
+                ctx,
+                q=None,
+                fact_type=None,
+                service=None,
+                region=None,
+                operation=None,
+                resource_property=None,
+                depth=2,
+                from_handle='concept:abc_def',
+                traverse=None,
+                relation='what limits',
+                direction='in',
+                resource_type=None,
+            )
+        assert mock_call.call_args[0][0] == {
+            'depth': 2,
+            'from': 'concept:abc_def',
+            'relation': 'what limits',
+            'direction': 'in',
+        }, 'relation intent must travel as its own slot, unparsed'
 
     @pytest.mark.asyncio
     async def test_no_arguments_abstains_without_a_round_trip(self):
@@ -261,6 +296,8 @@ class TestQueryToolPayload:
                 depth=None,
                 from_handle=None,
                 traverse=None,
+                relation=None,
+                direction=None,
                 resource_type=None,
             )
         mock_call.assert_not_called()
