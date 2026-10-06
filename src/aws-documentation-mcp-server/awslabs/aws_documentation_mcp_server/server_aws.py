@@ -102,7 +102,7 @@ mcp = MCPServer(
     - When `query_aws_facts` returns `status: "evidence"`, pass its `evidence` URLs to `read_documentation`. The fact store found no typed fact, so the prose is the answer.
     - When `query_aws_facts` returns `status: "abstain"` with `reason_code: "missing_slot"`, fill the named slot and call again. Do not rephrase the question.
     - When `query_aws_facts` returns `status: "ok"`, the fact is authoritative. Stop; do not search to confirm it.
-    - When `query_aws_facts` returns `status: "candidates"`, the rows only share words with the question. Check each `quota_name` against what was asked, and fall back to search if none fits. Never report a candidate as the answer without that check.
+    - When `query_aws_facts` returns `status: "candidates"`, the rows were not selected by an exact filter. Check each `quota_name` against what was asked, and fall back to search if none fits. Never report a candidate as the answer without that check. `status: "ok"` with `complete: true` is different: that set is exact and needs no verification.
 
     ## Tool Selection Guide
 
@@ -916,14 +916,22 @@ async def query_aws_facts(
 
     ## Reading `answer.status`, which decides the next move
 
-    - **`ok`** (or `status` absent): a slot resolved the fact. Stop. Do not search for confirmation.
-    - **`candidates`**: typed rows that share words with the question, which is weaker than a slot
-      lookup, so they may not answer it. Check `match_basis`: `operation` matched the named operation
-      but returned several rows, `query_terms` matched words in the question, and `all_service_quotas`
-      means nothing matched so the whole set is listed. Read
-      `quota_name` on each row and confirm it is the quota asked about. If none fits, say so and search
-      the documentation. Do NOT report a candidate as the answer without that check. A question about a
-      feature lands here, because features are not modelled.
+    - **`ok`**: an exact filter selected the rows, so the answer is correct. Stop; do not search for
+      confirmation. `answer.selection` is always `slot` here. Two shapes:
+      - a single row, which is the fact. Read it and stop.
+      - `complete: true` with `match_count` and `examples`, which is the **whole** set matching the
+        filter. This is a complete answer to a plural question, not something to verify. Asking for every
+        quota of a service lands here. `match_count` can be large, so narrow with `operation` or query
+        terms to reach one row rather than reading the examples as a ranking.
+    - **`candidates`**: the rows were NOT selected by an exact filter, so they may not answer the
+      question. Read `answer.selection`:
+      - `terms`: the rows merely share words with the question. Check `quota_name` on each and confirm it
+        is the quantity asked about. Ranking is by word overlap, so the first row is not necessarily it.
+      - `fallback`: a filter was given, matched nothing, and the whole set is shown instead. Treat this
+        as "not found", not as a list of answers.
+      In both cases, if no row clearly fits, say so and search the documentation. Do NOT report a
+      candidate as the answer without that check. A question about a feature lands here, because features
+      are not modelled.
     - **`abstain`**: nothing to return. Read `reason_code`:
       - `missing_slot`: fill the named slot and call again. Do NOT rephrase the question.
       - `ambiguous`: name the service to disambiguate the operation.
