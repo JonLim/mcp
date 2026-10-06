@@ -75,14 +75,51 @@ def _unavailable(reason: str) -> Dict[str, Any]:
     }
 
 
+def role_arn() -> str:
+    """Role to assume before signing. Empty means sign with the ambient credentials.
+
+    An API Gateway HTTP API cannot carry a resource policy, so a caller outside the store's own account
+    cannot be granted execute-api:Invoke directly and has to assume a role there instead. Not defaulted,
+    because a role ARN names an account.
+    """
+    return os.getenv('AWS_FACT_STORE_ROLE_ARN', '').strip()
+
+
 def _get_session():
-    """Reuse one boto3 Session. Credentials are re-read per call so a refresh is picked up."""
+    """Reuse one boto3 Session. Credentials are re-read per call so a refresh is picked up.
+
+    With AWS_FACT_STORE_ROLE_ARN set, the session carries refreshable assume-role credentials, so a
+    long-lived server keeps working past the one-hour session limit without the caller noticing.
+    """
     global _session
     if _session is None:
         import boto3
 
         profile = os.getenv('AWS_FACT_STORE_PROFILE') or os.getenv('AWS_PROFILE')
-        _session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+        base = boto3.Session(profile_name=profile) if profile else boto3.Session()
+        arn = role_arn()
+        if not arn:
+            _session = base
+            return _session
+        from botocore.credentials import AssumeRoleCredentialFetcher, DeferredRefreshableCredentials
+
+        def _regional(*args, **kwargs):
+            # The fetcher builds its own STS client, which otherwise resolves to the legacy global
+            # endpoint. Where an account disables that endpoint, AssumeRole fails with AccessDenied.
+            kwargs.setdefault('region_name', region())
+            return base.client(*args, **kwargs)
+
+        fetcher = AssumeRoleCredentialFetcher(
+            client_creator=_regional,
+            source_credentials=base.get_credentials(),
+            role_arn=arn,
+            extra_args={'RoleSessionName': 'aws-docs-facts'},
+        )
+        botocore_session = base._session
+        botocore_session._credentials = DeferredRefreshableCredentials(
+            fetcher.fetch_credentials, 'assume-role'
+        )
+        _session = boto3.Session(botocore_session=botocore_session)
     return _session
 
 
@@ -122,8 +159,8 @@ async def call(payload: Dict[str, Any]) -> Dict[str, Any]:
         credentials = _get_session().get_credentials()
         if credentials is None:
             return _unavailable(
-                'no AWS credentials found; set AWS_FACT_STORE_PROFILE to a profile with '
-                'execute-api:Invoke on the fact store API'
+                'no AWS credentials found; set AWS_FACT_STORE_PROFILE to a profile that can reach the '
+                'fact store, and AWS_FACT_STORE_ROLE_ARN when the store is in another account'
             )
         body = json.dumps(payload)
         request = AWSRequest(

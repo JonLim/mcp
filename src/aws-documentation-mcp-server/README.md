@@ -121,6 +121,7 @@ or docker after a successful `docker build -t mcp/aws-documentation .`:
 | `AWS_FACT_STORE_ENDPOINT` | Fact store query endpoint | the shared POC endpoint |
 | `AWS_FACT_STORE_REGION` | Signing region for the fact store API | `us-west-2` |
 | `AWS_FACT_STORE_PROFILE` | AWS profile used to sign fact store requests (falls back to `AWS_PROFILE`, then the default chain) | unset |
+| `AWS_FACT_STORE_ROLE_ARN` | Role to assume before signing. Needed when the store runs in a different AWS account from your credentials | unset |
 
 ### Corporate Network Support
 
@@ -240,6 +241,29 @@ The fact store endpoint is IAM-authorized, so requests are SigV4-signed with the
 credentials and the caller needs `execute-api:Invoke` on the API. Without access the two tools return an
 abstain with `reason_code: store_unavailable` and name the documentation tools as the fallback, so the
 rest of the server keeps working. Set `AWS_FACT_STORE_ENABLED=false` to leave them out of the tool list
+
+### Reaching a fact store in another account
+
+The query API is an API Gateway HTTP API with `AWS_IAM` authorization. HTTP APIs cannot carry a resource
+policy, so a principal outside the store's own account cannot be granted `execute-api:Invoke` directly. It
+has to assume a role in that account instead.
+
+Set both variables. The profile supplies your own credentials; the role ARN names what to assume:
+
+```jsonc
+"env": {
+  "AWS_FACT_STORE_PROFILE": "<your profile>",
+  "AWS_FACT_STORE_ROLE_ARN": "<ask the store owner>"
+}
+```
+
+Credentials refresh automatically, so a long-running server keeps working past the one-hour session
+limit. Leave `AWS_FACT_STORE_ROLE_ARN` unset when your credentials are already in the store's account.
+
+Two failure modes to expect. `AccessDenied` on `AssumeRole` means your role lacks `sts:AssumeRole` on the
+target, or the target does not trust your account. A `403` on the API itself means the assume succeeded but
+the assumed role lacks `execute-api:Invoke`. Both return an abstain-shaped result rather than an
+exception, so the agent gets a next action instead of a stack trace.
 entirely.
 
 ## Development
