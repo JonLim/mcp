@@ -44,6 +44,7 @@ from awslabs.aws_documentation_mcp_server.util import (
 from loguru import logger
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import BaseModel, Field, ValidationError
+from pydantic.fields import FieldInfo
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
 
@@ -1036,9 +1037,93 @@ async def query_aws_facts(
 
 # Registered conditionally: the fact store endpoint is IAM-authorized and not public, so a user without
 # access can set AWS_FACT_STORE_ENABLED=false and keep these out of the agent's tool list entirely.
+
+async def verify_aws_claim(
+    ctx: Context,
+    fact_type: str = Field(
+        description='Which kind of claim: quota, availability, endpoint.',
+    ),
+    service: str = Field(
+        description='Service code or the name as written in prose. Resolved the same way as elsewhere.',
+    ),
+    quota_name: Optional[str] = Field(
+        default=None,
+        description='For fact_type=quota: the quota name as the source states it.',
+    ),
+    asserted_value: Optional[float] = Field(
+        default=None,
+        description='For fact_type=quota: the numeric value the source claims.',
+    ),
+    region: Optional[str] = Field(
+        default=None,
+        description='For fact_type=availability or endpoint: the region the claim is about.',
+    ),
+    asserted: Optional[bool] = Field(
+        default=None,
+        description='For fact_type=availability: whether the source claims the service IS available.',
+    ),
+    asserted_regions: Optional[List[str]] = Field(
+        default=None,
+        description='For fact_type=availability: the full region list a source claims, to diff as a set.',
+    ),
+) -> Dict[str, Any]:
+    """Adjudicate a claim about AWS against the fact store. The reverse of asking for a fact.
+
+    Use this when a value comes from somewhere other than the fact store and its correctness matters: a
+    number recalled from training, a figure read off a documentation page, a constant already written into
+    code or a document under review. Asking "is this still true" is cheaper and more reliable than asking
+    for the fact and comparing by eye, because the comparison happens against the typed value rather than
+    against prose.
+
+    ## Verdicts, and what each one licenses
+
+    - **`CONFIRMED`**: the store holds the same value. Say so and move on.
+    - **`CONTRADICTED`**: the store holds a different value. `store_value` and `unit` are both returned.
+      **Check the units before repeating this as "the source is wrong"** — 1,024 Kilobytes and 1 MiB are
+      the same number, and that specific pair has caused a false contradiction before.
+    - **`DIVERGENT`**: a set claim that partly matches, with `doc_only` and `store_only` naming each side
+      of the difference. A divergence can mean the source is stale, the store is stale, or the two are
+      scoped differently, and the response does not decide which.
+    - **`ABSTAIN`**: the store cannot check it. **This is not evidence the claim is wrong.** `reason` says
+      whether the gap is the service, the fact type, or the shape of the claim.
+
+    The oracle is deliberately biased toward `ABSTAIN`, because telling an author their document is wrong
+    when it is not is a worse failure than declining to judge.
+
+    ## What it cannot settle
+
+    An applied quota in a live account, anything feature-scoped rather than service-scoped, and any
+    advisory claim. For those it abstains rather than guessing.
+
+    Args:
+        ctx: MCP context for logging and error handling
+        fact_type: The kind of claim
+        service: Service code or prose name
+        quota_name: The quota name, for a quota claim
+        asserted_value: The value the source claims, for a quota claim
+        region: The region, for an availability or endpoint claim
+        asserted: Whether the source claims availability, for an availability claim
+        asserted_regions: The region list a source claims, to diff as a set
+
+    Returns:
+        A verdict with the store's own value and its provenance
+    """
+    claim: Dict[str, Any] = {'fact_type': fact_type, 'service': service}
+    for key, value in (
+        ('quota_name', quota_name),
+        ('asserted_value', asserted_value),
+        ('region', region),
+        ('asserted', asserted),
+        ('asserted_regions', asserted_regions),
+    ):
+        if value is not None and not isinstance(value, FieldInfo):
+            claim[key] = value
+    return await fact_store.call({'verify': claim})
+
 if fact_store.is_configured():
     mcp.tool()(resolve_aws_entity)
     mcp.tool()(query_aws_facts)
+    mcp.tool()(verify_aws_claim)
     logger.info(f'Fact store tools registered against {fact_store.endpoint()}')
 else:
     logger.info('Fact store tools disabled (AWS_FACT_STORE_ENABLED=false)')

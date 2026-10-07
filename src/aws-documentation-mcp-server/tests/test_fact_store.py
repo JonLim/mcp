@@ -193,6 +193,26 @@ class TestQueryToolPayload:
     """The tool's job is to build a correct payload, so that is what gets asserted."""
 
     @pytest.mark.asyncio
+    async def test_verify_builds_a_claim_and_drops_unset_fields(self):
+        """A claim carries only the fields the caller set, so the oracle can tell shape from absence."""
+        from awslabs.aws_documentation_mcp_server.server_aws import verify_aws_claim
+
+        ctx = AsyncMock()
+        with patch.object(
+            fact_store, 'call', new=AsyncMock(return_value={'verdict': 'CONTRADICTED'})
+        ) as mock_call:
+            await verify_aws_claim(
+                ctx, fact_type='quota', service='Amazon SQS',
+                quota_name='Message Size', asserted_value=256,
+            )
+        sent = mock_call.call_args[0][0]
+        assert list(sent) == ['verify']
+        assert sent['verify'] == {
+            'fact_type': 'quota', 'service': 'Amazon SQS',
+            'quota_name': 'Message Size', 'asserted_value': 256,
+        }, 'an unset field must be absent, not null: the oracle branches on which keys are present'
+
+    @pytest.mark.asyncio
     async def test_queries_batches_and_caps_at_25(self):
         """A batch goes through as `queries`, capped, with every other slot ignored."""
         from awslabs.aws_documentation_mcp_server.server_aws import query_aws_facts
