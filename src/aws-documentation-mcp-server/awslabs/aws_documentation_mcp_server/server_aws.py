@@ -99,6 +99,8 @@ mcp = MCPServer(
     - If multiple searches with similar terms yield insufficient results, pivot to using `recommend` to find related pages.
     - Always cite the documentation URL when providing information to users
     - For an enumerable fact (a regional endpoint, which regions a service is in, a default quota value, an operation's required parameters, what must exist before an operation succeeds), call `query_aws_facts` before searching or recalling. These values are arbitrary and change, so a remembered one is often wrong.
+    - Pass the service name you already have to `query_aws_facts`; it resolves display names, aliases and renamed services itself. Calling `resolve_aws_entity` first costs an extra round trip and is only needed when the lookup abstains on resolution.
+    - Needing several facts at once is one call, not N: pass `queries` with up to 25 requests. Checking a stack across a region is the common case.
     - When `query_aws_facts` returns `status: "evidence"`, pass its `evidence` URLs to `read_documentation`. The fact store found no typed fact, so the prose is the answer.
     - When `query_aws_facts` returns `status: "abstain"` with `reason_code: "missing_slot"`, fill the named slot and call again. Do not rephrase the question.
     - When `query_aws_facts` returns `status: "ok"`, the fact is authoritative. Stop; do not search to confirm it.
@@ -830,7 +832,14 @@ async def query_aws_facts(
     ),
     service: Optional[str] = Field(
         default=None,
-        description='Canonical service code, for example sts, lambda, cognito-idp. Get it from resolve_aws_entity when unsure.',
+        description=(
+            'Service code or the name as written in prose. Both work: sts, lambda, cognito-idp, '
+            'and also "Amazon SQS", "Simple Queue Service", "Amazon CloudWatch". The store '
+            'resolves aliases, display names and renamed services itself and reports what it '
+            'resolved in route.service_resolution, so pass the name you already have rather than '
+            'calling resolve_aws_entity first. Only call that when this abstains with a '
+            'resolution failure, or when the ambiguity itself is the question.'
+        ),
     ),
     region: Optional[str] = Field(default=None, description='Region code, for example eu-west-1.'),
     operation: Optional[str] = Field(
@@ -867,6 +876,15 @@ async def query_aws_facts(
     resource_type: Optional[str] = Field(
         default=None,
         description='For traverse=operations_on_resource, for example AWS::SQS::Queue.',
+    ),
+    queries: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            'Up to 25 independent requests in one call, each an object using the same slots as above. '
+            'One round trip instead of N. Use this whenever several facts are needed at once, for '
+            'example one availability check per service across a stack. Every other argument is '
+            'ignored when this is set.'
+        ),
     ),
 ) -> Dict[str, Any]:
     """Look up an enumerable AWS fact from authoritative sources, or get an honest abstain.
@@ -968,10 +986,18 @@ async def query_aws_facts(
         relation: Relationship intent to walk from from_handle
         direction: Walk direction for relation: out, in, or both
         resource_type: Resource type, for operations_on_resource
+        queries: Up to 25 requests to run in one round trip
 
     Returns:
         An envelope with `answer` (carrying `status`), plus `entities`, `evidence`, `route` and `timing`
     """
+    # isinstance, not truthiness: called outside MCP an unset Field default is a FieldInfo, which is
+    # truthy and would route every call into the batch path.
+    if isinstance(queries, list) and queries:
+        # The endpoint caps a batch at 25 and echoes each request beside its result, so a caller can
+        # attribute the rows. One round trip costs one conversation turn; N calls cost N.
+        return await fact_store.call({'queries': [dict(x) for x in queries][:25]})
+
     payload: Dict[str, Any] = {}
     if q:
         payload['q'] = q

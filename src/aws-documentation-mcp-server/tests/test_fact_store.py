@@ -193,6 +193,22 @@ class TestQueryToolPayload:
     """The tool's job is to build a correct payload, so that is what gets asserted."""
 
     @pytest.mark.asyncio
+    async def test_queries_batches_and_caps_at_25(self):
+        """A batch goes through as `queries`, capped, with every other slot ignored."""
+        from awslabs.aws_documentation_mcp_server.server_aws import query_aws_facts
+
+        ctx = AsyncMock()
+        batch = [{'fact_type': 'availability', 'service': f'svc{i}'} for i in range(30)]
+        with patch.object(
+            fact_store, 'call', new=AsyncMock(return_value={'count': 25, 'results': []})
+        ) as mock_call:
+            await query_aws_facts(ctx, service='ignored-when-batching', queries=batch)
+        sent = mock_call.call_args[0][0]
+        assert list(sent) == ['queries'], 'a batch must not carry the single-request slots'
+        assert len(sent['queries']) == 25, 'the endpoint caps a batch at 25'
+        assert sent['queries'][0] == {'fact_type': 'availability', 'service': 'svc0'}
+
+    @pytest.mark.asyncio
     async def test_slots_map_onto_the_wire_names(self):
         """Slots map onto the wire names."""
         from awslabs.aws_documentation_mcp_server.server_aws import query_aws_facts
